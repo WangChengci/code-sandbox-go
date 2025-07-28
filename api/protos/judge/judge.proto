@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package judge;
+// import "api/protos/file/file.proto";
+
+option go_package = "code-sandbox-go/api/protos/judge";
+
+
+service judge {
+    rpc ExecuteCode(ExecuteCodeRequest) returns (ExecuteCodeResponse){}
+
+    // rpc CompileCode(CompileCodeRequest) returns (CompileCodeResponse){}
+}
+message ExecuteCodeRequest{
+    string code = 1;
+    string language = 2;
+    repeated string testCase = 3;
+}
+message ExecuteCodeResponse{
+    repeated string testCaseResult = 1;
+    repeated ExecutionInfo executeInfo = 2;
+}
+// message CompileCodeRequest{
+//     string language = 1;
+//     file.File file = 2;
+// }
+// message CompileCodeResponse{
+//     ExecutionInfo executeInfo = 1;
+// }
+
+// 执行信息
+message ExecutionInfo{
+    string stdout = 1;
+    string stderr = 2;
+    int32 exit_code = 3;
+    int64 execution_time_used_ms = 4;
+    int64 memory_used_kb = 5;
+    ExecutionStatus status = 6;
+}
+
+// 执行状态枚举
+enum ExecutionStatus{
+    UNKNOWN = 0;
+    EXECUTE_SUCCESS = 1;
+    COMPILE_ERROR = 2;
+    RUNTIME_ERROR = 3;
+    TIME_LIMIT_EXCEEDED = 4;
+    MEMORY_LIMIT_EXCEEDED = 5;
+    SYSTEM_ERROR = 7;
+    COMPILE_SUCCESS = 8;
+}

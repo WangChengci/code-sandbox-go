@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package file;
+
+option go_package = "code-sandbox-go/api/protos/file";
+
+service FileService {
+    rpc SaveFile(SaveFileRequest) returns (SaveFileResponse);
+      // 使用PascalCase
+    rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+
+    rpc GetFile(GetFileRequest) returns (GetFileResponse);
+}
+
+message File {
+    string fileName = 1;
+    string absolutePath = 2;
+    string relativePath = 3;
+    int64 sizeBytes = 4;      
+    int64 createdAt = 5;      
+}
+message SaveFileRequest{
+    string content = 1;
+    string fileName = 2;
+}
+message SaveFileResponse{
+    File file = 1;
+    bool success = 2;
+}
+message DeleteFileRequest{
+    File file = 1;
+}
+message DeleteFileResponse{
+    bool success = 1;
+}
+message GetFileRequest{
+    File file = 1;
+}
+message GetFileResponse{
+    bool success = 1;
+    string content = 2;
+}
