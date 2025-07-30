@@ -1,11 +1,15 @@
 package judge
 
 import (
+	"bytes"
+	"code-sandbox-go/api/protos/file"
 	"code-sandbox-go/api/protos/judge"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,79 +33,85 @@ func NewDockerExecutor() (*DockerExecutor, error) {
 
 	return &DockerExecutor{
 		client:      cli,
-		memoryLimit: 128 * units.MB,  // 128MB
+		memoryLimit: 256 * units.MB,  // 256MB
 		cpuLimit:    1,               // 1 CPU核心
 		timeLimit:   5 * time.Second, // 5秒超时
 	}, nil
 }
 
-// ExecuteWithCompile 容器复用方案：编译一次，在同一容器中执行多个测试用例
-// 这里执行多个
-func (e *DockerExecutor) ExecuteWithCompileOptimized(ctx context.Context, language, workDir, fileName string, testCases []string) ([]*judge.ExecutionInfo, []string, error) {
-	// 1. 编译阶段
-	compileInfo, err := e.CompileCode(ctx, language, workDir, fileName)
-	if err != nil {
-		return nil, nil, err
-	}
+// // ExecuteWithCompile 容器复用方案：编译一次，在同一容器中执行多个测试用例
+// // 这里执行多个
+// func (e *DockerExecutor) ExecuteWithCompileOptimized(ctx context.Context, language, workDir, fileName string, testCases []string) ([]*judge.ExecutionInfo, []string, error) {
+// 	// Main.java ---javac编译--- Main.class
+// 	// 1. 编译代码，
+// 	// 2. 编译完成，返回compileInfo（ExecutioinInfo）
+// 	// 3. 判断编译是否成功
+// 	// 4. 成功？创建容器 : 返回编译错误
+// 	// 5. 则传入容器id，执行代码
+// 	// 6. 执行完成，返回executionInfos（[]*judge.ExecutionInfo）和TestCaseResults（[]string）
+// 	compileInfo, err := e.CompileCode(ctx, language, workDir, fileName)
+// 	if err != nil {
+// 		return nil, nil, err
+// 	}
 
-	// 如果编译失败，所有测试用例都返回编译错误
-	if compileInfo.Status != judge.ExecutionStatus_COMPILE_SUCCESS {
-		results := make([]*judge.ExecutionInfo, len(testCases))
-		for i := range results {
-			results[i] = &judge.ExecutionInfo{
-				Status:              compileInfo.Status,
-				Stderr:              compileInfo.Stderr,
-				Stdout:              compileInfo.Stdout,
-				ExecutionTimeUsedMs: compileInfo.ExecutionTimeUsedMs,
-				MemoryUsedKb:        compileInfo.MemoryUsedKb,
-			}
-		}
-		return results, nil, nil
-	}
+// 	// 如果编译失败，所有测试用例都返回编译错误
+// 	if compileInfo.Status != judge.ExecutionStatus_COMPILE_SUCCESS {
+// 		results := make([]*judge.ExecutionInfo, len(testCases))
+// 		for i := range results {
+// 			results[i] = &judge.ExecutionInfo{
+// 				Status:              compileInfo.Status,
+// 				Stderr:              compileInfo.Stderr,
+// 				Stdout:              compileInfo.Stdout,
+// 				ExecutionTimeUsedMs: compileInfo.ExecutionTimeUsedMs,
+// 				MemoryUsedKb:        compileInfo.MemoryUsedKb,
+// 			}
+// 		}
+// 		return results, nil, nil
+// 	}
 
-	// 2. 创建执行容器（复用于所有测试用例）
-	containerID, err := e.createExecutionContainer(ctx, language, workDir)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer e.cleanupContainer(containerID)
+// 	// 2. 创建执行容器（复用于所有测试用例）
+// 	containerID, err := e.createExecutionContainer(ctx, language, workDir)
+// 	if err != nil {
+// 		return nil, nil, err
+// 	}
+// 	defer e.cleanupContainer(containerID)
 
-	// 3. 在同一容器中依次执行所有测试用例
-	executionInfos := make([]*judge.ExecutionInfo, len(testCases))
-	testCaseResults := make([]string, len(testCases))
-	for i, testCase := range testCases {
-		resultInfo, testCaseOutput, err := e.executeInContainer(ctx, containerID, testCase, language)
-		if err != nil {
-			executionInfos[i] = &judge.ExecutionInfo{
-				Status: judge.ExecutionStatus_SYSTEM_ERROR,
-				Stderr: fmt.Sprintf("Execution error: %v", err),
-			}
-			testCaseResults[i] = ""
-		} else {
-			executionInfos[i] = resultInfo
-			testCaseResults[i] = testCaseOutput
-		}
+// 	// 3. 在同一容器中依次执行所有测试用例
+// 	executionInfos := make([]*judge.ExecutionInfo, len(testCases))
+// 	testCaseResults := make([]string, len(testCases))
+// 	for i, testCase := range testCases {
+// 		resultInfo, testCaseOutput, err := e.executeInContainer(ctx, containerID, testCase, language)
+// 		if err != nil {
+// 			executionInfos[i] = &judge.ExecutionInfo{
+// 				Status: judge.ExecutionStatus_SYSTEM_ERROR,
+// 				Stderr: fmt.Sprintf("Execution error: %v", err),
+// 			}
+// 			testCaseResults[i] = ""
+// 		} else {
+// 			executionInfos[i] = resultInfo
+// 			testCaseResults[i] = testCaseOutput
+// 		}
 
-		// 清理容器状态（为下一个测试用例准备）
-		if i < len(testCases)-1 { // 最后一个测试用例不需要清理
-			e.resetContainerState(ctx, containerID)
-		}
-	}
+// 		// 清理容器状态（为下一个测试用例准备）
+// 		if i < len(testCases)-1 { // 最后一个测试用例不需要清理
+// 			e.resetContainerState(ctx, containerID)
+// 		}
+// 	}
 
-	return executionInfos, testCaseResults, nil
-}
+// 	return executionInfos, testCaseResults, nil
+// }
 
 // CompileCode 编译代码
-func (e *DockerExecutor) CompileCode(ctx context.Context, language, workDir, fileName string) (*judge.ExecutionInfo, error) {
+func (e *DockerExecutor) CompileCode(ctx context.Context, language string, codeFile *file.File) (*judge.ExecutionInfo, error) {
 	switch strings.ToLower(language) {
-	case "go":
-		return e.compileGo(ctx, workDir, fileName)
+	// case "go":
+	// 	return e.compileGo(ctx, codeFile)
 	case "java":
-		return e.compileJava(ctx, workDir, fileName)
-	case "cpp", "c++":
-		return e.compileCpp(ctx, workDir, fileName)
-	case "c":
-		return e.compileC(ctx, workDir, fileName)
+		return e.compileJava(ctx, codeFile)
+	// case "cpp", "c++":
+	// 	return e.compileCpp(ctx, codeFile)
+	// case "c":
+	// 	return e.compileC(ctx, codeFile)
 	case "python", "python3":
 		// Python不需要编译
 		return &judge.ExecutionInfo{
@@ -117,7 +127,7 @@ func (e *DockerExecutor) CompileCode(ctx context.Context, language, workDir, fil
 }
 
 // createExecutionContainer 创建执行容器
-func (e *DockerExecutor) createExecutionContainer(ctx context.Context, language, workDir string) (string, error) {
+func (e *DockerExecutor) CreateExecutionContainer(ctx context.Context, language, workDir string) (string, error) {
 	var config *container.Config
 
 	switch strings.ToLower(language) {
@@ -133,7 +143,7 @@ func (e *DockerExecutor) createExecutionContainer(ctx context.Context, language,
 		}
 	case "java":
 		config = &container.Config{
-			Image:        "openjdk:11-alpine",
+			Image:        "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/openjdk:8u342-jdk",
 			Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
 			WorkingDir:   "/workspace",
 			AttachStdout: true,
@@ -210,9 +220,12 @@ func (e *DockerExecutor) createExecutionContainer(ctx context.Context, language,
 	return createResp.ID, nil
 }
 
-// executeInContainer 在已存在的容器中执行代码
-func (e *DockerExecutor) executeInContainer(ctx context.Context, containerID, input, language string) (*judge.ExecutionInfo, string, error) {
+func (e *DockerExecutor) ExecuteInContainer(ctx context.Context, containerID, input, language string) (*judge.ExecutionInfo, string, error) {
 	start := time.Now()
+
+	// 创建带超时的上下文
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, e.timeLimit)
+	defer cancel()
 
 	// 根据不同语言生成执行命令
 	execCmd := e.getExecutionCommand(language)
@@ -225,13 +238,13 @@ func (e *DockerExecutor) executeInContainer(ctx context.Context, containerID, in
 		AttachStdin:  true,
 	}
 
-	execResp, err := e.client.ContainerExecCreate(ctx, containerID, execConfig)
+	execResp, err := e.client.ContainerExecCreate(ctxWithTimeout, containerID, execConfig)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create exec: %v", err)
 	}
 
 	// 附加到执行实例
-	attachResp, err := e.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{
+	attachResp, err := e.client.ContainerExecAttach(ctxWithTimeout, execResp.ID, container.ExecAttachOptions{
 		Detach: false,
 		Tty:    false,
 	})
@@ -241,69 +254,76 @@ func (e *DockerExecutor) executeInContainer(ctx context.Context, containerID, in
 	defer attachResp.Close()
 
 	// 启动执行
-	if err := e.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{
+	if err := e.client.ContainerExecStart(ctxWithTimeout, execResp.ID, container.ExecStartOptions{
 		Detach: false,
 		Tty:    false,
 	}); err != nil {
 		return nil, "", fmt.Errorf("failed to start exec: %v", err)
 	}
 
-	// 发送输入数据
+	// 使用 channel 同步输入发送
+	inputSent := make(chan struct{})
 	if input != "" {
 		go func() {
+			defer close(inputSent)
 			defer attachResp.CloseWrite()
-			// 确保输入以换行符结尾
 			if !strings.HasSuffix(input, "\n") {
 				input += "\n"
 			}
 			attachResp.Conn.Write([]byte(input))
 		}()
+	} else {
+		close(inputSent)
+		attachResp.CloseWrite()
+	}
+
+	// 等待输入发送完成
+	select {
+	case <-inputSent:
+		// 输入发送完成
+	case <-ctxWithTimeout.Done():
+		return &judge.ExecutionInfo{
+			Status: judge.ExecutionStatus_TIME_LIMIT_EXCEEDED,
+			Stderr: "Input sending timeout",
+		}, "", nil
+	}
+
+	// 读取输出
+	outputData, err := io.ReadAll(attachResp.Reader)
+	if err != nil {
+		return &judge.ExecutionInfo{
+			Status: judge.ExecutionStatus_SYSTEM_ERROR,
+			Stderr: fmt.Sprintf("failed to read output: %v", err),
+		}, "", nil
 	}
 
 	// 等待执行完成
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, e.timeLimit)
-	defer cancel()
-
-	done := make(chan struct{})
-	var execInfo *judge.ExecutionInfo
-	var programOutput string
-
-	go func() {
-		defer close(done)
-
-		// 读取所有输出
-		outputData, err := io.ReadAll(attachResp.Reader)
-		if err != nil {
-			execInfo = &judge.ExecutionInfo{
-				Status: judge.ExecutionStatus_SYSTEM_ERROR,
-				Stderr: fmt.Sprintf("failed to read output: %v", err),
-			}
-			return
-		}
-
-		// 等待执行完成并获取退出码
-		for {
-			inspectResp, err := e.client.ContainerExecInspect(ctx, execResp.ID)
+	for {
+		select {
+		case <-ctxWithTimeout.Done():
+			return &judge.ExecutionInfo{
+				Status:              judge.ExecutionStatus_TIME_LIMIT_EXCEEDED,
+				Stderr:              "Execution timeout",
+				ExecutionTimeUsedMs: e.timeLimit.Milliseconds(),
+			}, "", nil
+		default:
+			inspectResp, err := e.client.ContainerExecInspect(ctxWithTimeout, execResp.ID)
 			if err != nil {
-				execInfo = &judge.ExecutionInfo{
+				return &judge.ExecutionInfo{
 					Status: judge.ExecutionStatus_SYSTEM_ERROR,
 					Stderr: fmt.Sprintf("failed to inspect exec: %v", err),
-				}
-				return
+				}, "", nil
 			}
 
 			if !inspectResp.Running {
 				// 解析输出
 				stdout, stderr := e.parseContainerLogs(outputData)
 				executionTime := time.Since(start)
-
-				// 程序的实际输出就是 stdout
-				programOutput = strings.TrimSpace(stdout)
+				programOutput := strings.TrimSpace(stdout)
 
 				// 获取内存使用情况
-				statsResp, err := e.client.ContainerStats(ctx, containerID, false)
 				var memoryUsage int64
-				if err == nil {
+				if statsResp, err := e.client.ContainerStats(ctxWithTimeout, containerID, false); err == nil {
 					defer statsResp.Body.Close()
 					var statsData container.Stats
 					if err := json.NewDecoder(statsResp.Body).Decode(&statsData); err == nil {
@@ -314,7 +334,7 @@ func (e *DockerExecutor) executeInContainer(ctx context.Context, containerID, in
 				// 判断执行状态
 				execStatus := e.determineExecutionStatus(int64(inspectResp.ExitCode), stdout, stderr)
 
-				execInfo = &judge.ExecutionInfo{
+				execInfo := &judge.ExecutionInfo{
 					Status:              execStatus,
 					Stdout:              stdout,
 					Stderr:              stderr,
@@ -322,24 +342,13 @@ func (e *DockerExecutor) executeInContainer(ctx context.Context, containerID, in
 					ExecutionTimeUsedMs: executionTime.Milliseconds(),
 					MemoryUsedKb:        memoryUsage / 1024,
 				}
-				break
+
+				return execInfo, programOutput, nil
 			}
 
-			// 短暂等待后重试
-			time.Sleep(10 * time.Millisecond)
+			// 增加轮询间隔，减少 CPU 消耗
+			time.Sleep(50 * time.Millisecond)
 		}
-	}()
-
-	select {
-	case <-done:
-		return execInfo, programOutput, nil
-	case <-ctxWithTimeout.Done():
-		// 超时处理
-		return &judge.ExecutionInfo{
-			Status:              judge.ExecutionStatus_TIME_LIMIT_EXCEEDED,
-			Stderr:              "Execution timeout",
-			ExecutionTimeUsedMs: e.timeLimit.Milliseconds(),
-		}, "", nil
 	}
 }
 
@@ -362,7 +371,7 @@ func (e *DockerExecutor) getExecutionCommand(language string) []string {
 }
 
 // resetContainerState 重置容器状态
-func (e *DockerExecutor) resetContainerState(ctx context.Context, containerID string) error {
+func (e *DockerExecutor) ResetContainerState(ctx context.Context, containerID string) error {
 	// 清理临时文件和重置工作目录状态
 	execConfig := container.ExecOptions{
 		Cmd: []string{"sh", "-c", "rm -f /tmp/* 2>/dev/null || true"},
@@ -377,7 +386,7 @@ func (e *DockerExecutor) resetContainerState(ctx context.Context, containerID st
 }
 
 // cleanupContainer 清理容器
-func (e *DockerExecutor) cleanupContainer(containerID string) error {
+func (e *DockerExecutor) CleanupContainer(containerID string) error {
 	// TODO:这里的ctx不需要传进去吗
 	ctx := context.Background()
 	e.client.ContainerKill(ctx, containerID, "SIGTERM")
@@ -388,149 +397,109 @@ func (e *DockerExecutor) cleanupContainer(containerID string) error {
 }
 
 // 编译方法实现
-func (e *DockerExecutor) compileGo(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-	config := &container.Config{
-		Image:        "golang:1.21-alpine",
-		Cmd:          []string{"sh", "-c", fmt.Sprintf("go build -o main %s", fileName)},
-		WorkingDir:   "/workspace",
-		AttachStdout: true,
-		AttachStderr: true,
-	}
-	hostConfig := &container.HostConfig{
-		NetworkMode: "none",
-		AutoRemove:  true,
-		Binds: []string{
-			fmt.Sprintf("%s:/workspace", workDir),
-		},
-	}
-	return e.runCompileContainer(ctx, config, hostConfig)
-}
+// func (e *DockerExecutor) compileGo(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
+// 	config := &container.Config{
+// 		Image:        "golang:1.21-alpine",
+// 		Cmd:          []string{"sh", "-c", fmt.Sprintf("go build -o main %s", fileName)},
+// 		WorkingDir:   "/workspace",
+// 		AttachStdout: true,
+// 		AttachStderr: true,
+// 	}
+// 	hostConfig := &container.HostConfig{
+// 		NetworkMode: "none",
+// 		AutoRemove:  false,
+// 		Binds: []string{
+// 			fmt.Sprintf("%s:/workspace", workDir),
+// 		},
+// 	}
+// 	return e.runCompileContainer(ctx, config, hostConfig)
+// }
 
-func (e *DockerExecutor) compileJava(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-	config := &container.Config{
-		Image:        "openjdk:11-alpine",
-		Cmd:          []string{"sh", "-c", fmt.Sprintf("javac %s && mv *.class main", fileName)},
-		WorkingDir:   "/workspace",
-		AttachStdout: true,
-		AttachStderr: true,
-	}
-	hostConfig := &container.HostConfig{
-		NetworkMode: "none",
-		AutoRemove:  true,
-		Binds: []string{
-			fmt.Sprintf("%s:/workspace", workDir),
-		},
-	}
-	return e.runCompileContainer(ctx, config, hostConfig)
-}
-
-func (e *DockerExecutor) compileCpp(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-	config := &container.Config{
-		Image:        "gcc:alpine",
-		Cmd:          []string{"sh", "-c", fmt.Sprintf("g++ -o main %s", fileName)},
-		WorkingDir:   "/workspace",
-		AttachStdout: true,
-		AttachStderr: true,
-	}
-	hostConfig := &container.HostConfig{
-		NetworkMode: "none",
-		AutoRemove:  true,
-		Binds: []string{
-			fmt.Sprintf("%s:/workspace", workDir),
-		},
-	}
-	return e.runCompileContainer(ctx, config, hostConfig)
-}
-
-func (e *DockerExecutor) compileC(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-	config := &container.Config{
-		Image:        "gcc:alpine",
-		Cmd:          []string{"sh", "-c", fmt.Sprintf("gcc -o main %s", fileName)},
-		WorkingDir:   "/workspace",
-		AttachStdout: true,
-		AttachStderr: true,
-	}
-	hostConfig := &container.HostConfig{
-		NetworkMode: "none",
-		AutoRemove:  true,
-		Binds: []string{
-			fmt.Sprintf("%s:/workspace", workDir),
-		},
-	}
-	return e.runCompileContainer(ctx, config, hostConfig)
-}
-
-// runCompileContainer 运行编译容器
-// 根据不同语言的编译命令，执行命令（命令在config里）
-func (e *DockerExecutor) runCompileContainer(ctx context.Context, config *container.Config, hostConfig *container.HostConfig) (*judge.ExecutionInfo, error) {
+func (e *DockerExecutor) compileJava(ctx context.Context, codeFile *file.File) (*judge.ExecutionInfo, error) {
 	start := time.Now()
+	cmd := exec.CommandContext(ctx, "javac", "-encoding", "utf-8", codeFile.AbsolutePath)
+	cmd.Dir = filepath.Dir(codeFile.GetAbsolutePath())
 
-	createResp, err := e.client.ContainerCreate(ctx, config, hostConfig, nil, nil, "")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	compileTime := time.Since(start)
+
+	stdoutStr := strings.TrimSpace(stdout.String())
+	stderrStr := strings.TrimSpace(stderr.String())
+
+	// 判断编译结果
+	var compileStatus judge.ExecutionStatus
+	var exitCode int32
+
 	if err != nil {
-		return &judge.ExecutionInfo{
-			Status: judge.ExecutionStatus_COMPILE_ERROR,
-			Stderr: fmt.Sprintf("failed to create container: %v", err),
-		}, nil
-	}
-	containerID := createResp.ID
-
-	if err := e.client.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		return &judge.ExecutionInfo{
-			Status: judge.ExecutionStatus_SYSTEM_ERROR,
-			Stderr: fmt.Sprintf("failed to start container: %v", err),
-		}, nil
-	}
-
-	waitResp, errCh := e.client.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
-	select {
-	case err := <-errCh:
-		if err != nil {
-			return &judge.ExecutionInfo{
-				Status: judge.ExecutionStatus_SYSTEM_ERROR,
-				Stderr: fmt.Sprintf("failed to wait container: %v", err),
-			}, nil
-		}
-	case status := <-waitResp:
-		logs, err := e.client.ContainerLogs(ctx, containerID, container.LogsOptions{
-			ShowStdout: true,
-			ShowStderr: true,
-		})
-		if err != nil {
-			return &judge.ExecutionInfo{
-				Status: judge.ExecutionStatus_SYSTEM_ERROR,
-				Stderr: fmt.Sprintf("failed to get container logs: %v", err),
-			}, nil
-		}
-		defer logs.Close()
-
-		logData, err := io.ReadAll(logs)
-		if err != nil {
-			return &judge.ExecutionInfo{
-				Status: judge.ExecutionStatus_SYSTEM_ERROR,
-				Stderr: fmt.Sprintf("failed to read container logs: %v", err),
-			}, nil
-		}
-
-		stdout, stderr := e.parseContainerLogs(logData)
-		executionTime := time.Since(start)
-
-		var execStatus judge.ExecutionStatus
-		if status.StatusCode == 0 {
-			execStatus = judge.ExecutionStatus_COMPILE_SUCCESS
+		// 出错
+		compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = int32(exitError.ExitCode())
 		} else {
-			execStatus = judge.ExecutionStatus_COMPILE_ERROR
+			// 系统错误（如javac命令不存在）
+			compileStatus = judge.ExecutionStatus_SYSTEM_ERROR
+			if stderrStr == "" {
+				stderrStr = fmt.Sprintf("Failed to execute javac: %v", err)
+			}
+			exitCode = -1
 		}
-
-		return &judge.ExecutionInfo{
-			Status:              execStatus,
-			Stdout:              stdout,
-			Stderr:              stderr,
-			ExitCode:            int32(status.StatusCode),
-			ExecutionTimeUsedMs: executionTime.Milliseconds(),
-		}, nil
+	} else {
+		compileStatus = judge.ExecutionStatus_COMPILE_SUCCESS
+		exitCode = 0
+		if stdoutStr == "" {
+			stdoutStr = "Java compilation successful"
+		}
 	}
-	return nil, nil
+	return &judge.ExecutionInfo{
+		Status:              compileStatus,
+		Stdout:              stdoutStr,
+		Stderr:              stderrStr,
+		ExitCode:            exitCode,
+		ExecutionTimeUsedMs: compileTime.Milliseconds(),
+		MemoryUsedKb:        0,
+	}, nil
+
 }
+
+// func (e *DockerExecutor) compileCpp(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
+// 	config := &container.Config{
+// 		Image:        "gcc:alpine",
+// 		Cmd:          []string{"sh", "-c", fmt.Sprintf("g++ -o main %s", fileName)},
+// 		WorkingDir:   "/workspace",
+// 		AttachStdout: true,
+// 		AttachStderr: true,
+// 	}
+// 	hostConfig := &container.HostConfig{
+// 		NetworkMode: "none",
+// 		AutoRemove:  false,
+// 		Binds: []string{
+// 			fmt.Sprintf("%s:/workspace", workDir),
+// 		},
+// 	}
+// 	return e.runCompileContainer(ctx, config, hostConfig)
+// }
+
+// func (e *DockerExecutor) compileC(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
+// 	config := &container.Config{
+// 		Image:        "gcc:alpine",
+// 		Cmd:          []string{"sh", "-c", fmt.Sprintf("gcc -o main %s", fileName)},
+// 		WorkingDir:   "/workspace",
+// 		AttachStdout: true,
+// 		AttachStderr: true,
+// 	}
+// 	hostConfig := &container.HostConfig{
+// 		NetworkMode: "none",
+// 		AutoRemove:  false,
+// 		Binds: []string{
+// 			fmt.Sprintf("%s:/workspace", workDir),
+// 		},
+// 	}
+// 	return e.runCompileContainer(ctx, config, hostConfig)
+// }
 
 // 保留原有的辅助方法
 func (e *DockerExecutor) parseContainerLogs(logData []byte) (stdout, stderr string) {

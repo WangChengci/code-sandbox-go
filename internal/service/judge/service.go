@@ -45,23 +45,75 @@ func (js *JudgeService) ExecuteCode(ctx context.Context, req *judge.ExecuteCodeR
 		deleteReq := &filepb.DeleteFileRequest{
 			File: saveResp.File,
 		}
-		js.fileService.DeleteFile(ctx, deleteReq)
+		js.fileService.DeleteDir(ctx, deleteReq)
 	}()
 
+	// 1. 编译代码，
 	// 使用容器复用方案执行所有测试用例
-	executionInfos, testCaseResult, err := js.executor.ExecuteWithCompileOptimized(
-		ctx,
-		req.Language,
-		filepath.Dir(saveResp.File.AbsolutePath),
-		saveResp.File.FileName,
-		req.TestCase,
-	)
+	compileInfo, err := js.executor.CompileCode(ctx, req.Language, saveResp.File)
+	// 2. 编译完成，返回compileInfo（ExecutioinInfo）
+	// 3. 判断编译是否成功
 	if err != nil {
-		return nil, err
+		// 系统级错误（如编译器不存在等）
+		return &judge.ExecuteCodeResponse{
+			TestCaseResult: nil,
+			ExecuteInfo: []*judge.ExecutionInfo{{
+				Status: judge.ExecutionStatus_SYSTEM_ERROR,
+				Stderr: fmt.Sprintf("Compilation system error: %v", err),
+			}},
+		}, nil // 注意这里返回 nil 而不是 error
 	}
 
+	// 2. 编译完成，返回compileInfo（ExecutionInfo）
+	// 3. 判断编译是否成功
+	if compileInfo.Status != judge.ExecutionStatus_COMPILE_SUCCESS {
+		// 编译失败，返回编译错误信息
+		return &judge.ExecuteCodeResponse{
+			TestCaseResult: nil,
+			ExecuteInfo:    []*judge.ExecutionInfo{compileInfo},
+		}, nil // 编译失败不是系统错误，应该返回 nil
+	}
+
+	containerID, err := js.executor.CreateExecutionContainer(ctx, req.Language, filepath.Dir(saveResp.File.AbsolutePath))
+	if err != nil {
+		return &judge.ExecuteCodeResponse{
+			TestCaseResult: nil,
+			ExecuteInfo: []*judge.ExecutionInfo{{
+				Status:              judge.ExecutionStatus_SYSTEM_ERROR,
+				Stderr:              fmt.Sprintf("Failed to create execution container: %v", err),
+				ExecutionTimeUsedMs: 0,
+				MemoryUsedKb:        0,
+			}},
+		}, nil
+	}
+	defer func() {
+		js.executor.CleanupContainer(containerID)
+	}()
+	// 4. 成功？创建容器 : 返回编译错误
+	// 5. 传入容器id，执行代码
+	// 6. 执行完成，返回executionInfos（[]*judge.ExecutionInfo）和TestCaseResults（[]string）
+	executionInfos := make([]*judge.ExecutionInfo, len(req.TestCase))
+	testCaseResults := make([]string, len(req.TestCase))
+	for i, testCase := range req.TestCase {
+		resultInfo, testCaseOutput, err := js.executor.ExecuteInContainer(ctx, containerID, testCase, req.Language)
+		if err != nil {
+			executionInfos[i] = &judge.ExecutionInfo{
+				Status: judge.ExecutionStatus_SYSTEM_ERROR,
+				Stderr: fmt.Sprintf("Execution error: %v", err),
+			}
+			testCaseResults[i] = ""
+		} else {
+			executionInfos[i] = resultInfo
+			testCaseResults[i] = testCaseOutput
+		}
+		// 清理容器状态（为下一个测试用例准备）
+		if i < len(req.TestCase)-1 { // 最后一个测试用例不需要清理
+			js.executor.ResetContainerState(ctx, containerID)
+		}
+	}
+	// 6. 返回执行结果
 	return &judge.ExecuteCodeResponse{
-		TestCaseResult: testCaseResult,
+		TestCaseResult: testCaseResults,
 		ExecuteInfo:    executionInfos,
 	}, nil
 }
@@ -85,14 +137,3 @@ func (s *JudgeService) GetFileName(language string) string {
 		return filepath.Join(subDir, "main.txt")
 	}
 }
-
-// func (s *JudgeService) needCompilation(language string) bool {
-// 	switch strings.ToLower(language) {
-// 	case "go", "java", "cpp", "c++", "c":
-// 		return true
-// 	case "python", "python3", "javascript", "js":
-// 		return false
-// 	default:
-// 		return false
-// 	}
-// }

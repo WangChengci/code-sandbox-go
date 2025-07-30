@@ -9,6 +9,8 @@ service FileService {
       // 使用PascalCase
     rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
 
+    rpc DeleteDir(DeleteFileRequest) returns (DeleteFileResponse);
+
     rpc GetFile(GetFileRequest) returns (GetFileResponse);
 }
 

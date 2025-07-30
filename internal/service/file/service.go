@@ -101,6 +101,24 @@ func (fs *FileService) DeleteFile(ctx context.Context, req *filepb.DeleteFileReq
 	}, nil
 }
 
+func (fs *FileService) DeleteDir(ctx context.Context, req *filepb.DeleteFileRequest) (*filepb.DeleteFileResponse, error) {
+	dirPath := filepath.Dir(req.File.AbsolutePath)
+	if err := os.RemoveAll(dirPath); err != nil {
+		if os.IsNotExist(err) {
+			return &filepb.DeleteFileResponse{
+				Success: true,
+			}, nil
+		}
+		return &filepb.DeleteFileResponse{
+			Success: false,
+		}, fmt.Errorf("删除目录失败: %v", err)
+	}
+
+	return &filepb.DeleteFileResponse{
+		Success: true,
+	}, nil
+}
+
 // GetFile 获取文件内容
 func (fs *FileService) GetFile(ctx context.Context, req *filepb.GetFileRequest) (*filepb.GetFileResponse, error) {
 	filePath := req.File.AbsolutePath

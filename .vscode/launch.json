@@ -8,8 +8,8 @@
             "name": "Launch Package",
             "type": "go",
             "request": "launch",
-            "mode": "auto",
-            "program": "${fileDirname}"
+            "mode": "debug",
+            "program": "/home/ubuntu/Go_Work/code-sandbox-go/cmd/server/main.go"
         }
     ]
 }
