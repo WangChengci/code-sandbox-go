@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -104,12 +105,12 @@ func NewDockerExecutor() (*DockerExecutor, error) {
 // CompileCode 编译代码
 func (e *DockerExecutor) CompileCode(ctx context.Context, language string, codeFile *file.File) (*judge.ExecutionInfo, error) {
 	switch strings.ToLower(language) {
-	// case "go":
-	// 	return e.compileGo(ctx, codeFile)
+	case "go":
+		return e.compileGo(ctx, codeFile)
 	case "java":
 		return e.compileJava(ctx, codeFile)
-	// case "cpp", "c++":
-	// 	return e.compileCpp(ctx, codeFile)
+	case "cpp", "c++":
+		return e.compileCpp(ctx, codeFile)
 	// case "c":
 	// 	return e.compileC(ctx, codeFile)
 	case "python", "python3":
@@ -133,18 +134,19 @@ func (e *DockerExecutor) CreateExecutionContainer(ctx context.Context, language,
 	switch strings.ToLower(language) {
 	case "go":
 		config = &container.Config{
-			Image:        "golang:1.21-alpine",
-			Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"}, // 保持容器运行
+			Image: "golang:1.21-alpine",
+			// Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"}, // 保持容器运行
 			WorkingDir:   "/workspace",
 			AttachStdout: true,
 			AttachStderr: true,
 			AttachStdin:  true,
 			OpenStdin:    true,
 		}
+		// Image:        "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/openjdk:8u342-jdk",
 	case "java":
 		config = &container.Config{
-			Image:        "swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/openjdk:8u342-jdk",
-			Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
+			Image: "openjdk:latest",
+			// Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
 			WorkingDir:   "/workspace",
 			AttachStdout: true,
 			AttachStderr: true,
@@ -153,7 +155,7 @@ func (e *DockerExecutor) CreateExecutionContainer(ctx context.Context, language,
 		}
 	case "cpp", "c++":
 		config = &container.Config{
-			Image:        "gcc:alpine",
+			Image:        "gcc:latest ",
 			Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
 			WorkingDir:   "/workspace",
 			AttachStdout: true,
@@ -163,7 +165,7 @@ func (e *DockerExecutor) CreateExecutionContainer(ctx context.Context, language,
 		}
 	case "c":
 		config = &container.Config{
-			Image:        "gcc:alpine",
+			Image:        "gcc:latest ",
 			Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
 			WorkingDir:   "/workspace",
 			AttachStdout: true,
@@ -173,8 +175,8 @@ func (e *DockerExecutor) CreateExecutionContainer(ctx context.Context, language,
 		}
 	case "python", "python3":
 		config = &container.Config{
-			Image:        "python:3.9-alpine",
-			Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
+			Image: "python:3.9-alpine",
+			// Cmd:          []string{"sh", "-c", "while true; do sleep 1; done"},
 			WorkingDir:   "/workspace",
 			AttachStdout: true,
 			AttachStderr: true,
@@ -397,23 +399,75 @@ func (e *DockerExecutor) CleanupContainer(containerID string) error {
 }
 
 // 编译方法实现
-// func (e *DockerExecutor) compileGo(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-// 	config := &container.Config{
-// 		Image:        "golang:1.21-alpine",
-// 		Cmd:          []string{"sh", "-c", fmt.Sprintf("go build -o main %s", fileName)},
-// 		WorkingDir:   "/workspace",
-// 		AttachStdout: true,
-// 		AttachStderr: true,
-// 	}
-// 	hostConfig := &container.HostConfig{
-// 		NetworkMode: "none",
-// 		AutoRemove:  false,
-// 		Binds: []string{
-// 			fmt.Sprintf("%s:/workspace", workDir),
-// 		},
-// 	}
-// 	return e.runCompileContainer(ctx, config, hostConfig)
-// }
+func (e *DockerExecutor) compileGo(ctx context.Context, codeFile *file.File) (*judge.ExecutionInfo, error) {
+	start := time.Now()
+
+	// 获取工作目录
+	workDir := filepath.Dir(codeFile.GetAbsolutePath())
+
+	// 初始化Go模块（如果不存在go.mod）
+	goModPath := filepath.Join(workDir, "go.mod")
+	if _, err := os.Stat(goModPath); os.IsNotExist(err) {
+		// 创建go.mod文件
+		initCmd := exec.CommandContext(ctx, "go", "mod", "init", "main")
+		initCmd.Dir = workDir
+		if err := initCmd.Run(); err != nil {
+			// 如果初始化失败，继续尝试编译
+		}
+	}
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", "main", codeFile.AbsolutePath)
+	cmd.Dir = filepath.Dir(codeFile.GetAbsolutePath())
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	compileTime := time.Since(start)
+
+	stdoutStr := strings.TrimSpace(stdout.String())
+	stderrStr := strings.TrimSpace(stderr.String())
+
+	// 判断编译结果
+	var compileStatus judge.ExecutionStatus
+	var exitCode int32
+
+	if err != nil {
+		// 出错
+		compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = int32(exitError.ExitCode())
+		} else {
+			// 系统错误（如javac命令不存在）
+			compileStatus = judge.ExecutionStatus_SYSTEM_ERROR
+			if stderrStr == "" {
+				stderrStr = fmt.Sprintf("Failed to execute javac: %v", err)
+			}
+			exitCode = -1
+		}
+	} else {
+		compileStatus = judge.ExecutionStatus_COMPILE_SUCCESS
+		exitCode = 0
+		if stdoutStr == "" {
+			stdoutStr = "Go compilation successful"
+		}
+		// 检查编译产物是否存在
+		executablePath := filepath.Join(workDir, "main")
+		if _, err := os.Stat(executablePath); os.IsNotExist(err) {
+			compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+			stderrStr = "Compilation succeeded but executable not found"
+			exitCode = 1
+		}
+	}
+	return &judge.ExecutionInfo{
+		Status:              compileStatus,
+		Stdout:              stdoutStr,
+		Stderr:              stderrStr,
+		ExitCode:            exitCode,
+		ExecutionTimeUsedMs: compileTime.Milliseconds(),
+		MemoryUsedKb:        0,
+	}, nil
+}
 
 func (e *DockerExecutor) compileJava(ctx context.Context, codeFile *file.File) (*judge.ExecutionInfo, error) {
 	start := time.Now()
@@ -465,41 +519,125 @@ func (e *DockerExecutor) compileJava(ctx context.Context, codeFile *file.File) (
 
 }
 
-// func (e *DockerExecutor) compileCpp(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-// 	config := &container.Config{
-// 		Image:        "gcc:alpine",
-// 		Cmd:          []string{"sh", "-c", fmt.Sprintf("g++ -o main %s", fileName)},
-// 		WorkingDir:   "/workspace",
-// 		AttachStdout: true,
-// 		AttachStderr: true,
-// 	}
-// 	hostConfig := &container.HostConfig{
-// 		NetworkMode: "none",
-// 		AutoRemove:  false,
-// 		Binds: []string{
-// 			fmt.Sprintf("%s:/workspace", workDir),
-// 		},
-// 	}
-// 	return e.runCompileContainer(ctx, config, hostConfig)
-// }
+func (e *DockerExecutor) compileCpp(ctx context.Context, codeFile *file.File) (*judge.ExecutionInfo, error) {
+	start := time.Now()
+	workDir := filepath.Dir(codeFile.GetAbsolutePath())
 
-// func (e *DockerExecutor) compileC(ctx context.Context, workDir, fileName string) (*judge.ExecutionInfo, error) {
-// 	config := &container.Config{
-// 		Image:        "gcc:alpine",
-// 		Cmd:          []string{"sh", "-c", fmt.Sprintf("gcc -o main %s", fileName)},
-// 		WorkingDir:   "/workspace",
-// 		AttachStdout: true,
-// 		AttachStderr: true,
-// 	}
-// 	hostConfig := &container.HostConfig{
-// 		NetworkMode: "none",
-// 		AutoRemove:  false,
-// 		Binds: []string{
-// 			fmt.Sprintf("%s:/workspace", workDir),
-// 		},
-// 	}
-// 	return e.runCompileContainer(ctx, config, hostConfig)
-// }
+	// 使用g++编译C++代码，生成可执行文件main
+	cmd := exec.CommandContext(ctx, "g++", "-std=c++17", "-O2", "-o", "main", codeFile.AbsolutePath)
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	compileTime := time.Since(start)
+
+	stdoutStr := strings.TrimSpace(stdout.String())
+	stderrStr := strings.TrimSpace(stderr.String())
+
+	// 判断编译结果
+	var compileStatus judge.ExecutionStatus
+	var exitCode int32
+
+	if err != nil {
+		// 出错
+		compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = int32(exitError.ExitCode())
+		} else {
+			// 系统错误（如g++命令不存在）
+			compileStatus = judge.ExecutionStatus_SYSTEM_ERROR
+			if stderrStr == "" {
+				stderrStr = fmt.Sprintf("Failed to execute g++: %v", err)
+			}
+			exitCode = -1
+		}
+	} else {
+		compileStatus = judge.ExecutionStatus_COMPILE_SUCCESS
+		exitCode = 0
+		if stdoutStr == "" {
+			stdoutStr = "C++ compilation successful"
+		}
+		// 检查编译产物是否存在
+		executablePath := filepath.Join(workDir, "main")
+		if _, err := os.Stat(executablePath); os.IsNotExist(err) {
+			compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+			stderrStr = "Compilation succeeded but executable not found"
+			exitCode = 1
+		}
+	}
+
+	return &judge.ExecutionInfo{
+		Status:              compileStatus,
+		Stdout:              stdoutStr,
+		Stderr:              stderrStr,
+		ExitCode:            exitCode,
+		ExecutionTimeUsedMs: compileTime.Milliseconds(),
+		MemoryUsedKb:        0,
+	}, nil
+}
+
+func (e *DockerExecutor) compileC(ctx context.Context, codeFile *file.File) (*judge.ExecutionInfo, error) {
+	start := time.Now()
+	workDir := filepath.Dir(codeFile.GetAbsolutePath())
+
+	// 使用gcc编译C代码，生成可执行文件main
+	cmd := exec.CommandContext(ctx, "gcc", "-std=c11", "-O2", "-o", "main", codeFile.AbsolutePath)
+	cmd.Dir = workDir
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	compileTime := time.Since(start)
+
+	stdoutStr := strings.TrimSpace(stdout.String())
+	stderrStr := strings.TrimSpace(stderr.String())
+
+	// 判断编译结果
+	var compileStatus judge.ExecutionStatus
+	var exitCode int32
+
+	if err != nil {
+		// 出错
+		compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = int32(exitError.ExitCode())
+		} else {
+			// 系统错误（如gcc命令不存在）
+			compileStatus = judge.ExecutionStatus_SYSTEM_ERROR
+			if stderrStr == "" {
+				stderrStr = fmt.Sprintf("Failed to execute gcc: %v", err)
+			}
+			exitCode = -1
+		}
+	} else {
+		compileStatus = judge.ExecutionStatus_COMPILE_SUCCESS
+		exitCode = 0
+		if stdoutStr == "" {
+			stdoutStr = "C compilation successful"
+		}
+		// 检查编译产物是否存在
+		executablePath := filepath.Join(workDir, "main")
+		if _, err := os.Stat(executablePath); os.IsNotExist(err) {
+			compileStatus = judge.ExecutionStatus_COMPILE_ERROR
+			stderrStr = "Compilation succeeded but executable not found"
+			exitCode = 1
+		}
+	}
+
+	return &judge.ExecutionInfo{
+		Status:              compileStatus,
+		Stdout:              stdoutStr,
+		Stderr:              stderrStr,
+		ExitCode:            exitCode,
+		ExecutionTimeUsedMs: compileTime.Milliseconds(),
+		MemoryUsedKb:        0,
+	}, nil
+}
 
 // 保留原有的辅助方法
 func (e *DockerExecutor) parseContainerLogs(logData []byte) (stdout, stderr string) {
