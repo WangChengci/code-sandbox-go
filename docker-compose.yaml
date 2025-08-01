@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  code-sandbox-go:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: code-sandbox-go-service
+    ports:
+      - "50051:50051"
+    volumes:
+      # 挂载Docker socket以便容器内可以使用Docker
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 挂载temp目录用于文件存储
+      - ./temp:/app/temp
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    networks:
+      - code-sandbox-network
+    depends_on:
+      - docker-setup
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "50051" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # 用于确保Docker环境准备就绪的辅助服务
+  docker-setup:
+    image: docker:latest
+    container_name: docker-setup
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: >
+      sh -c "
+        echo 'Checking Docker environment...'
+        docker info
+        echo 'Pulling required images...'
+        docker pull golang:1.21-alpine || true
+        docker pull openjdk:8u342-jdk || true
+        docker pull gcc:alpine || true
+        docker pull python:3.9-alpine || true
+        echo 'Docker setup complete'
+      "
+    networks:
+      - code-sandbox-network
+
+networks:
+  code-sandbox-network:
+    driver: bridge
