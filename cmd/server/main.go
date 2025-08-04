@@ -52,7 +52,7 @@ func main() {
 	}
 
 	log.Println("gRPC服务器启动在端口 :50051")
-	log.Println("文件服务已注册")
+	log.Println("判题服务已注册")
 	if err := server.Serve(lis); err != nil {
 		log.Fatalf("gRPC服务器启动失败: %v", err)
 	}

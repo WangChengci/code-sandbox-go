@@ -1,52 +1,59 @@
 version: '3.8'
 
 services:
-  code-sandbox-go:
+  judge-service:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: code-sandbox-go-service
+      dockerfile: dockerfile
+    container_name: judge-service
     ports:
       - "50051:50051"
     volumes:
-      # 挂载Docker socket以便容器内可以使用Docker
+      # 挂载 Docker socket 以便容器内可以使用 Docker
       - /var/run/docker.sock:/var/run/docker.sock
-      # 挂载temp目录用于文件存储
+      # 挂载 temp 目录用于文件存储
       - ./temp:/app/temp
     environment:
       - TZ=Asia/Shanghai
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      # Go 运行时优化
+      - GOMAXPROCS=2
+      - GOMEMLIMIT=1536MiB
     restart: unless-stopped
     networks:
-      - code-sandbox-network
-    depends_on:
-      - docker-setup
+      - judge-network
+    # 健康检查
     healthcheck:
-      test: [ "CMD", "nc", "-z", "localhost", "50051" ]
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  # 用于确保Docker环境准备就绪的辅助服务
-  docker-setup:
-    image: docker:latest
-    container_name: docker-setup
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    command: >
-      sh -c "
-        echo 'Checking Docker environment...'
-        docker info
-        echo 'Pulling required images...'
-        docker pull golang:1.21-alpine || true
-        docker pull openjdk:8u342-jdk || true
-        docker pull gcc:alpine || true
-        docker pull python:3.9-alpine || true
-        echo 'Docker setup complete'
-      "
-    networks:
-      - code-sandbox-network
+    # 针对 2核4G 服务器的资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'      # 最多使用 1.5 核，为系统保留 0.5 核
+          memory: 2G       # 最多使用 2GB，为系统和其他进程保留 2GB
+        reservations:
+          cpus: '0.5'      # 保证至少 0.5 核
+          memory: 512M     # 保证至少 512MB
+    # 安全配置
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: false  # 需要写入 temp 目录
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
 
 networks:
-  code-sandbox-network:
+  judge-network:
     driver: bridge
+    name: judge-network
+
+volumes:
+  temp_data:
+    driver: local
