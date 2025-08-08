@@ -194,11 +194,11 @@ func (e *DockerExecutor) ExecuteInContainer(ctx context.Context, containerID, in
 	defer attachResp.Close()
 
 	// 启动执行
-	if err := e.client.ContainerExecStart(ctxWithTimeout, execResp.ID, container.ExecStartOptions{
+	if execErr := e.client.ContainerExecStart(ctxWithTimeout, execResp.ID, container.ExecStartOptions{
 		Detach: false,
 		Tty:    false,
-	}); err != nil {
-		return nil, "", fmt.Errorf("failed to start exec: %v", err)
+	}); execErr != nil {
+		return nil, "", fmt.Errorf("failed to start exec: %v", execErr)
 	}
 
 	// 使用 channel 同步输入发送
@@ -239,6 +239,7 @@ func (e *DockerExecutor) ExecuteInContainer(ctx context.Context, containerID, in
 
 	// 等待执行完成
 	for {
+		// 使用select语句监听超时信号，
 		select {
 		case <-ctxWithTimeout.Done():
 			return &judge.ExecutionInfo{
@@ -256,7 +257,7 @@ func (e *DockerExecutor) ExecuteInContainer(ctx context.Context, containerID, in
 			}
 
 			if !inspectResp.Running {
-				// 解析输出
+				// 执行完成，开始收集结果，解析输出
 				stdout, stderr := e.parseContainerLogs(outputData)
 				executionTime := time.Since(start)
 				programOutput := strings.TrimSpace(stdout)
@@ -265,14 +266,14 @@ func (e *DockerExecutor) ExecuteInContainer(ctx context.Context, containerID, in
 				var memoryUsage int64
 				if statsResp, err := e.client.ContainerStats(ctxWithTimeout, containerID, false); err == nil {
 					defer statsResp.Body.Close()
-					var statsData container.Stats
+					var statsData container.StatsResponse
 					if err := json.NewDecoder(statsResp.Body).Decode(&statsData); err == nil {
 						memoryUsage = int64(statsData.MemoryStats.Usage)
 					}
 				}
 
 				// 判断执行状态
-				execStatus := e.determineExecutionStatus(int64(inspectResp.ExitCode), stdout, stderr)
+				execStatus := e.determineExecutionStatus(int64(inspectResp.ExitCode), stderr)
 
 				execInfo := &judge.ExecutionInfo{
 					Status:              execStatus,
@@ -609,7 +610,7 @@ func (e *DockerExecutor) parseContainerLogs(logData []byte) (stdout, stderr stri
 	return strings.TrimSpace(stdoutBuilder.String()), strings.TrimSpace(stderrBuilder.String())
 }
 
-func (e *DockerExecutor) determineExecutionStatus(exitCode int64, stdout, stderr string) judge.ExecutionStatus {
+func (e *DockerExecutor) determineExecutionStatus(exitCode int64, stderr string) judge.ExecutionStatus {
 	switch exitCode {
 	case 0:
 		return judge.ExecutionStatus_EXECUTE_SUCCESS
