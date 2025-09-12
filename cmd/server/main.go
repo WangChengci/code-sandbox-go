@@ -8,7 +8,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/docker/docker/client"
 	"google.golang.org/grpc"
@@ -50,6 +52,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("监听端口失败: %v", err)
 	}
+
+	// 设置优雅关闭
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-c
+		log.Println("正在优雅关闭服务器...")
+		judgeService.Close() // 添加这一行来关闭worker pool
+		server.GracefulStop()
+	}()
 
 	log.Println("gRPC服务器启动在端口 :50051")
 	log.Println("判题服务已注册")

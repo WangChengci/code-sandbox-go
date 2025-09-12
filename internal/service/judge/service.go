@@ -4,10 +4,12 @@ import (
 	filepb "code-sandbox-go/api/protos/file"
 	"code-sandbox-go/api/protos/judge"
 	"code-sandbox-go/internal/service/file"
+	"code-sandbox-go/internal/workerpool"
 	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -16,6 +18,7 @@ type JudgeService struct {
 	judge.UnimplementedJudgeServer
 	executor    *DockerExecutor
 	fileService *file.FileService
+	workerpool  *workerpool.WorkerPool
 }
 
 func NewJudgeService(fileService *file.FileService) (*JudgeService, error) {
@@ -24,15 +27,74 @@ func NewJudgeService(fileService *file.FileService) (*JudgeService, error) {
 		return nil, fmt.Errorf("failed to create docker executor: %v", err)
 	}
 
+	// 创建worker pool，默认配置：10个worker，队列大小100
+	workerPool := workerpool.NewWorkerPool(4, 100)
+	workerPool.Start()
+
 	return &JudgeService{
 		executor:    executor,
 		fileService: fileService,
+		workerpool:  workerPool,
 	}, nil
+}
+
+// Close 关闭服务，清理资源
+func (js *JudgeService) Close() {
+	if js.workerpool != nil {
+		js.workerpool.Stop()
+	}
 }
 
 func (js *JudgeService) ExecuteCode(ctx context.Context, req *judge.ExecuteCodeRequest) (*judge.ExecuteCodeResponse, error) {
 	// 保存代码文件
+	taskID := uuid.New().String()
 
+	executeTesk := func() (interface{}, error) {
+		return js.executeCodeInternal(ctx, req)
+	}
+
+	result, err := js.workerpool.SubmitTaskWithWait(
+		ctx,
+		taskID,
+		executeTesk,
+		30*time.Second,
+		30*time.Second,
+	)
+
+	if err != nil {
+		return &judge.ExecuteCodeResponse{
+			TestCaseResult: nil,
+			ExecuteInfo: []*judge.ExecutionInfo{{
+				Status: judge.ExecutionStatus_SYSTEM_ERROR,
+				Stderr: fmt.Sprintf("Worker pool error: %v", err),
+			}},
+		}, nil
+	}
+
+	if result.Error != nil {
+		return &judge.ExecuteCodeResponse{
+			TestCaseResult: nil,
+			ExecuteInfo: []*judge.ExecutionInfo{{
+				Status: judge.ExecutionStatus_SYSTEM_ERROR,
+				Stderr: fmt.Sprintf("Task error: %v", result.Error),
+			}},
+		}, nil
+	}
+
+	response, ok := result.Data.(*judge.ExecuteCodeResponse)
+	if !ok {
+		return &judge.ExecuteCodeResponse{
+			TestCaseResult: nil,
+			ExecuteInfo: []*judge.ExecutionInfo{{
+				Status: judge.ExecutionStatus_SYSTEM_ERROR,
+				Stderr: fmt.Sprintf("Invalid response type: %T", result.Data),
+			}},
+		}, nil
+	}
+	return response, nil
+}
+
+func (js *JudgeService) executeCodeInternal(ctx context.Context, req *judge.ExecuteCodeRequest) (*judge.ExecuteCodeResponse, error) {
 	fileName := js.GetFileName(req.Language)
 	saveResp, err := js.fileService.SaveFile(ctx, &filepb.SaveFileRequest{
 		Content:  req.Code,
